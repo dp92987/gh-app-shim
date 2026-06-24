@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# gh-app-shim — a transparent replacement for the `gh` CLI.
+#
+#   * When invoked inside a Claude Code session (CLAUDECODE is set), it
+#     authenticates as a GitHub App installation, so PRs, comments and
+#     reviews appear as the app bot — not as a human user.
+#   * When invoked by a human in a normal shell, it passes straight through
+#     to the real `gh` and uses whatever auth the human already has.
+#
+# Configuration lives outside this repo (no secrets in git):
+#   ~/.config/gh-app-shim/config.env   (override with GH_APP_SHIM_CONFIG)
+#
+set -euo pipefail
+
+CONFIG_FILE="${GH_APP_SHIM_CONFIG:-$HOME/.config/gh-app-shim/config.env}"
+# shellcheck disable=SC1090
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+# --- locate the real gh (never this shim) -----------------------------------
+resolve_real_gh() {
+  if [[ -n "${REAL_GH:-}" && -x "${REAL_GH:-}" ]]; then
+    printf '%s' "$REAL_GH"
+    return 0
+  fi
+  local me cand resolved
+  me=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+  while IFS= read -r cand; do
+    [[ -z "$cand" ]] && continue
+    resolved=$(readlink -f "$cand" 2>/dev/null || printf '%s' "$cand")
+    [[ "$resolved" == "$me" ]] && continue
+    printf '%s' "$cand"
+    return 0
+  done < <(type -ap gh 2>/dev/null)
+  return 1
+}
+
+real_gh=$(resolve_real_gh) || {
+  echo "gh-app-shim: could not locate the real gh binary." >&2
+  echo "             set REAL_GH in $CONFIG_FILE, or install gh." >&2
+  exit 127
+}
+
+# --- human shell → transparent pass-through ---------------------------------
+if [[ -z "${CLAUDECODE:-}" ]]; then
+  exec "$real_gh" "$@"
+fi
+
+# --- Claude Code session → authenticate as the GitHub App bot ---------------
+: "${APP_ID:?gh-app-shim: APP_ID not set in $CONFIG_FILE}"
+: "${INSTALLATION_ID:?gh-app-shim: INSTALLATION_ID not set in $CONFIG_FILE}"
+: "${KEY_PATH:?gh-app-shim: KEY_PATH not set in $CONFIG_FILE}"
+
+TOKEN_FILE="${TOKEN_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/gh-app-shim-token}"
+EXPIRES_FILE="${TOKEN_FILE}.expires"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+mint_token() {
+  if [[ ! -r "$KEY_PATH" ]]; then
+    echo "gh-app-shim: cannot read private key at $KEY_PATH" >&2
+    exit 1
+  fi
+  local now iat exp header payload signature jwt response token
+  now=$(date +%s)
+  iat=$((now - 60))
+  exp=$((now + 540))   # GitHub rejects App JWTs with >10 min lifetime
+  header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+  payload=$(printf '{"iss":"%s","iat":%d,"exp":%d}' "$APP_ID" "$iat" "$exp" | b64url)
+  signature=$(printf '%s.%s' "$header" "$payload" \
+    | openssl dgst -sha256 -sign "$KEY_PATH" -binary \
+    | b64url)
+  jwt="${header}.${payload}.${signature}"
+
+  response=$(curl -fsS -X POST \
+    -H "Authorization: Bearer ${jwt}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/app/installations/${INSTALLATION_ID}/access_tokens") || {
+      echo "gh-app-shim: request for installation token failed" >&2
+      exit 1
+    }
+
+  token=$(printf '%s' "$response" | grep -o '"token"[ ]*:[ ]*"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ -z "$token" ]]; then
+    echo "gh-app-shim: failed to obtain installation token" >&2
+    printf '%s\n' "$response" >&2
+    exit 1
+  fi
+
+  ( umask 077; printf '%s' "$token" > "$TOKEN_FILE" )
+  # Installation tokens live ~1h; cache for 55m, the shim adds a 60s buffer.
+  printf '%s' "$(($(date +%s) + 3300))" > "$EXPIRES_FILE"
+}
+
+need_refresh=true
+if [[ -f "$TOKEN_FILE" && -f "$EXPIRES_FILE" ]]; then
+  if (( $(date +%s) < $(cat "$EXPIRES_FILE") - 60 )); then
+    need_refresh=false
+  fi
+fi
+$need_refresh && mint_token
+
+# Guard: never let gh silently fall back to the human's keyring auth.
+# If GH_TOKEN reaches gh empty (missing/empty cache file), gh uses the
+# personal token from hosts.yml and acts as the human — the precise failure
+# this shim exists to prevent. An installation token is always "ghs_…"; bail
+# loudly on anything else instead of impersonating the user.
+app_token=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+if [[ "$app_token" != ghs_* ]]; then
+  echo "gh-app-shim: no valid installation token available; refusing to run" >&2
+  echo "             as your personal GitHub account. Try again (the shim will" >&2
+  echo "             re-mint), or check APP_ID/INSTALLATION_ID/KEY_PATH in"     >&2
+  echo "             $CONFIG_FILE." >&2
+  exit 1
+fi
+
+# Override GITHUB_TOKEN too, so a stray personal token in the environment
+# can't shadow the installation token.
+exec env GH_TOKEN="$app_token" GITHUB_TOKEN="$app_token" "$real_gh" "$@"

@@ -78,6 +78,38 @@ gh api user --jq .login                # -> your personal login
 The bot can only act on repositories the GitHub App is installed on. Add or
 remove repos from the App's installation in its GitHub settings.
 
+## Scoping the bot to specific orgs/repos
+
+By default the bot may act on any repository the App is installed on. You can
+narrow that further from `config.env` — useful when one App installation spans
+repos you'd rather Claude never touch as the bot:
+
+```sh
+# Allow-list: the bot runs ONLY for these (anything else is refused).
+ALLOW_ORGS="acme widgets-inc"
+ALLOW_REPOS="someuser/special-repo"
+
+# Deny-list: always blocked, and takes precedence over the allow-list.
+DENY_ORGS="personal-stuff"
+DENY_REPOS="acme/secret-repo"
+```
+
+All four are space-separated and case-insensitive; orgs match the repo owner,
+repos are `owner/repo`. Leave them unset for the original unrestricted behavior.
+
+The target repo is resolved from an explicit `-R`/`--repo` flag, or otherwise
+from the current directory's git `origin` (then `upstream`) remote — the same
+way `gh` itself picks a repo. When the target is out of scope the shim **refuses
+to run** rather than acting as the bot:
+
+```
+$ CLAUDECODE=1 gh pr create -R other/repo
+gh-app-shim: other/repo is outside the configured scope; refusing to run.
+```
+
+Commands with no detectable repo (e.g. `gh api user`, `gh auth status`) always
+run as the bot — scope only filters repo-targeted commands.
+
 ### Troubleshooting
 
 When `CLAUDECODE=1 gh api /installation/repositories` fails, the error tells you
@@ -88,6 +120,7 @@ which credential `gh` actually used:
 | `403 You must authenticate with an installation access token` | `gh` used your **personal** token, not the App's — the shim isn't on `PATH` first, or `CLAUDECODE` wasn't set | check `which gh` points at `~/.local/bin/gh`; the hardened shim now refuses this instead of impersonating you |
 | `401 Bad credentials` | the installation token is **expired or invalid** | delete the cache (`rm "$XDG_RUNTIME_DIR"/gh-app-shim-token*`) so the shim re-mints; if it persists, re-check `APP_ID` / `INSTALLATION_ID` / `KEY_PATH` |
 | `gh-app-shim: no valid installation token available` | the shim couldn't mint a token and stopped (by design) rather than acting as you | verify the `.pem` is readable and the config values are correct |
+| `gh-app-shim: <repo> is outside the configured scope` | the target repo isn't allowed by `ALLOW_*`/`DENY_*` in your config | add it to `ALLOW_ORGS`/`ALLOW_REPOS` (or remove it from `DENY_*`), or run from a repo that's in scope — see [Scoping the bot](#scoping-the-bot-to-specific-orgsrepos) |
 
 ## Restore on a new machine
 

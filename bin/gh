@@ -46,10 +46,101 @@ if [[ -z "${CLAUDECODE:-}" ]]; then
   exec "$real_gh" "$@"
 fi
 
+# --- scope enforcement: which orgs/repos the bot is allowed to act on -------
+# Optional config (space-separated, case-insensitive):
+#   ALLOW_ORGS / ALLOW_REPOS  — if either is set, the bot runs ONLY for repos
+#                               whose owner is in ALLOW_ORGS or whose
+#                               "owner/repo" is in ALLOW_REPOS.
+#   DENY_ORGS  / DENY_REPOS   — always blocked, and take precedence over allow.
+# With none set, the bot is unrestricted (original behavior). Commands with no
+# detectable repo (e.g. `gh api user`) are always allowed to run as the bot.
+
+# Normalize a repo spec — "owner/repo", a GitHub URL, an scp-style git remote,
+# or "host/owner/repo" — to "owner/repo". Prints nothing and returns 1 if it
+# can't extract both an owner and a repo.
+normalize_repo() {
+  local spec="${1%.git}" owner repo rest
+  if [[ "$spec" == *@*:* ]]; then        # git@github.com:owner/repo
+    spec="${spec##*:}"
+  elif [[ "$spec" == *://* ]]; then      # https://github.com/owner/repo
+    spec="${spec#*://}"; spec="${spec#*/}"
+  fi
+  spec="${spec%/}"
+  repo="${spec##*/}"
+  rest="${spec%/*}"
+  owner="${rest##*/}"
+  [[ -n "$owner" && -n "$repo" && "$owner" != "$repo" ]] || return 1
+  printf '%s/%s' "$owner" "$repo"
+}
+
+# Pull an explicit -R/--repo target out of the gh argument list, if present.
+detect_repo_from_args() {
+  local want_value="" a
+  for a in "$@"; do
+    if [[ -n "$want_value" ]]; then
+      normalize_repo "$a"; return
+    fi
+    case "$a" in
+      -R|--repo)  want_value=1 ;;
+      --repo=*)   normalize_repo "${a#--repo=}"; return ;;
+      -R?*)       normalize_repo "${a#-R}"; return ;;
+    esac
+  done
+  return 1
+}
+
+# Fall back to the current directory's git remote (origin, then upstream).
+detect_repo_from_git() {
+  local url
+  url=$(git remote get-url origin 2>/dev/null) \
+    || url=$(git remote get-url upstream 2>/dev/null) \
+    || return 1
+  normalize_repo "$url"
+}
+
+# Case-insensitive membership test: in_list <needle> <space-separated list>.
+in_list() {
+  local needle="${1,,}" item
+  for item in $2; do
+    [[ "${item,,}" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+refuse_scope() {
+  echo "gh-app-shim: $1 is outside the configured scope; refusing to run." >&2
+  echo "             adjust ALLOW_ORGS/ALLOW_REPOS/DENY_ORGS/DENY_REPOS in"  >&2
+  echo "             $CONFIG_FILE." >&2
+  exit 1
+}
+
+enforce_scope() {
+  # Nothing configured → unrestricted, as before.
+  [[ -n "${ALLOW_ORGS:-}${ALLOW_REPOS:-}${DENY_ORGS:-}${DENY_REPOS:-}" ]] || return 0
+
+  local repo owner
+  repo=$(detect_repo_from_args "$@") || repo=$(detect_repo_from_git) || repo=""
+  # No repo detected (e.g. `gh api user`) → allow.
+  [[ -n "$repo" ]] || return 0
+  owner="${repo%%/*}"
+
+  # Deny lists win outright.
+  if in_list "$repo" "${DENY_REPOS:-}" || in_list "$owner" "${DENY_ORGS:-}"; then
+    refuse_scope "$repo"
+  fi
+  # If an allow list exists, the repo must match it.
+  if [[ -n "${ALLOW_ORGS:-}${ALLOW_REPOS:-}" ]]; then
+    in_list "$repo" "${ALLOW_REPOS:-}" || in_list "$owner" "${ALLOW_ORGS:-}" \
+      || refuse_scope "$repo"
+  fi
+}
+
 # --- Claude Code session → authenticate as the GitHub App bot ---------------
 : "${APP_ID:?gh-app-shim: APP_ID not set in $CONFIG_FILE}"
 : "${INSTALLATION_ID:?gh-app-shim: INSTALLATION_ID not set in $CONFIG_FILE}"
 : "${KEY_PATH:?gh-app-shim: KEY_PATH not set in $CONFIG_FILE}"
+
+enforce_scope "$@"
 
 TOKEN_FILE="${TOKEN_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/gh-app-shim-token}"
 EXPIRES_FILE="${TOKEN_FILE}.expires"

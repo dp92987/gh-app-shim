@@ -46,14 +46,20 @@ if [[ -z "${CLAUDECODE:-}" ]]; then
   exec "$real_gh" "$@"
 fi
 
-# --- scope enforcement: which orgs/repos the bot is allowed to act on -------
+# --- passthrough: which orgs/repos should act as YOU, not the bot -----------
+# By default a Claude Code session acts as the GitHub App bot. For repos/orgs
+# listed below, the shim falls through to the real gh with your own auth — so
+# Claude acts as you there, just like a normal terminal would. Access control
+# (which repos the bot can touch at all) is left to the App's own GitHub
+# permissions; this setting only chooses which credential to use.
+#
 # Optional config (space-separated, case-insensitive):
-#   ALLOW_ORGS / ALLOW_REPOS  — if either is set, the bot runs ONLY for repos
-#                               whose owner is in ALLOW_ORGS or whose
-#                               "owner/repo" is in ALLOW_REPOS.
-#   DENY_ORGS  / DENY_REPOS   — always blocked, and take precedence over allow.
-# With none set, the bot is unrestricted (original behavior). Commands with no
-# detectable repo (e.g. `gh api user`) are always allowed to run as the bot.
+#   PASSTHROUGH_ORGS   — match the repo owner.
+#   PASSTHROUGH_REPOS  — match the full "owner/repo".
+# With none set, every Claude Code invocation acts as the bot (original
+# behavior). Commands with no detectable repo (e.g. `gh api user`) act as the
+# bot. The target repo is taken from an explicit -R/--repo flag, else the
+# current directory's git origin/upstream remote.
 
 # Normalize a repo spec — "owner/repo", a GitHub URL, an scp-style git remote,
 # or "host/owner/repo" — to "owner/repo". Prints nothing and returns 1 if it
@@ -107,40 +113,28 @@ in_list() {
   return 1
 }
 
-refuse_scope() {
-  echo "gh-app-shim: $1 is outside the configured scope; refusing to run." >&2
-  echo "             adjust ALLOW_ORGS/ALLOW_REPOS/DENY_ORGS/DENY_REPOS in"  >&2
-  echo "             $CONFIG_FILE." >&2
-  exit 1
-}
-
-enforce_scope() {
-  # Nothing configured → unrestricted, as before.
-  [[ -n "${ALLOW_ORGS:-}${ALLOW_REPOS:-}${DENY_ORGS:-}${DENY_REPOS:-}" ]] || return 0
+# True if this invocation targets a repo/org configured for passthrough.
+wants_passthrough() {
+  [[ -n "${PASSTHROUGH_ORGS:-}${PASSTHROUGH_REPOS:-}" ]] || return 1
 
   local repo owner
   repo=$(detect_repo_from_args "$@") || repo=$(detect_repo_from_git) || repo=""
-  # No repo detected (e.g. `gh api user`) → allow.
-  [[ -n "$repo" ]] || return 0
+  # No repo detected (e.g. `gh api user`) → act as the bot, not passthrough.
+  [[ -n "$repo" ]] || return 1
   owner="${repo%%/*}"
 
-  # Deny lists win outright.
-  if in_list "$repo" "${DENY_REPOS:-}" || in_list "$owner" "${DENY_ORGS:-}"; then
-    refuse_scope "$repo"
-  fi
-  # If an allow list exists, the repo must match it.
-  if [[ -n "${ALLOW_ORGS:-}${ALLOW_REPOS:-}" ]]; then
-    in_list "$repo" "${ALLOW_REPOS:-}" || in_list "$owner" "${ALLOW_ORGS:-}" \
-      || refuse_scope "$repo"
-  fi
+  in_list "$repo" "${PASSTHROUGH_REPOS:-}" || in_list "$owner" "${PASSTHROUGH_ORGS:-}"
 }
+
+# Configured passthrough repo → behave like a normal terminal (your own auth).
+if wants_passthrough "$@"; then
+  exec "$real_gh" "$@"
+fi
 
 # --- Claude Code session → authenticate as the GitHub App bot ---------------
 : "${APP_ID:?gh-app-shim: APP_ID not set in $CONFIG_FILE}"
 : "${INSTALLATION_ID:?gh-app-shim: INSTALLATION_ID not set in $CONFIG_FILE}"
 : "${KEY_PATH:?gh-app-shim: KEY_PATH not set in $CONFIG_FILE}"
-
-enforce_scope "$@"
 
 TOKEN_FILE="${TOKEN_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/gh-app-shim-token}"
 EXPIRES_FILE="${TOKEN_FILE}.expires"

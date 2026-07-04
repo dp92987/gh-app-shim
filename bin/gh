@@ -2,9 +2,10 @@
 #
 # gh-app-shim — a transparent replacement for the `gh` CLI.
 #
-#   * When invoked inside a Claude Code session (CLAUDECODE is set), it
-#     authenticates as a GitHub App installation, so PRs, comments and
-#     reviews appear as the app bot — not as a human user.
+#   * When invoked inside an agent session — Claude Code (CLAUDECODE is set) or
+#     Codex (GH_SHIM_CODEX is set; see install.sh) — it authenticates as a
+#     GitHub App installation, so PRs, comments and reviews appear as the app
+#     bot, not as a human user.
 #   * When invoked by a human in a normal shell, it passes straight through
 #     to the real `gh` and uses whatever auth the human already has.
 #
@@ -42,7 +43,11 @@ real_gh=$(resolve_real_gh) || {
 }
 
 # --- human shell → transparent pass-through ---------------------------------
-if [[ -z "${CLAUDECODE:-}" ]]; then
+# CLAUDECODE is set by Claude Code; GH_SHIM_CODEX is injected into Codex
+# sessions via ~/.codex/config.toml's shell_environment_policy (Codex has no
+# built-in marker of its own — install.sh wires this up). With neither set we
+# are in a plain human shell, so pass straight through to the real gh.
+if [[ -z "${CLAUDECODE:-}" && -z "${GH_SHIM_CODEX:-}" ]]; then
   exec "$real_gh" "$@"
 fi
 

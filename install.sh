@@ -70,6 +70,36 @@ else
   log "seeded config: $CONFIG_FILE"
 fi
 
+# --- 4. Codex marker --------------------------------------------------------
+# Unlike Claude Code (which sets CLAUDECODE), Codex exposes no built-in "inside
+# a session" env var. We inject our own via Codex's shell_environment_policy,
+# which forwards it into every command Codex spawns; the shim treats
+# GH_SHIM_CODEX exactly like CLAUDECODE. Editing an existing TOML table safely
+# from bash is fragile, so we only write when we can do so unambiguously and
+# otherwise print the line for the user to add by hand.
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_CONFIG="$CODEX_DIR/config.toml"
+CODEX_BLOCK='[shell_environment_policy]
+set = { GH_SHIM_CODEX = "1" }'
+
+if ! command -v codex >/dev/null 2>&1 && [[ ! -e "$CODEX_CONFIG" ]]; then
+  log "codex not detected — skipping Codex marker (Claude Code uses CLAUDECODE)"
+elif [[ -f "$CODEX_CONFIG" ]] && grep -q 'GH_SHIM_CODEX' "$CODEX_CONFIG"; then
+  log "Codex marker already present: $CODEX_CONFIG (left untouched)"
+elif [[ -f "$CODEX_CONFIG" ]] && grep -q 'shell_environment_policy' "$CODEX_CONFIG"; then
+  warn "Codex config already has a [shell_environment_policy] block: $CODEX_CONFIG
+        Add this into its 'set' table by hand so the shim fires under Codex:
+            GH_SHIM_CODEX = \"1\""
+else
+  mkdir -p "$CODEX_DIR"
+  if [[ -s "$CODEX_CONFIG" ]]; then
+    printf '\n%s\n' "$CODEX_BLOCK" >> "$CODEX_CONFIG"
+  else
+    printf '%s\n' "$CODEX_BLOCK" > "$CODEX_CONFIG"
+  fi
+  log "added Codex marker: $CODEX_CONFIG"
+fi
+
 cat <<EOF
 
 Done. Final steps:

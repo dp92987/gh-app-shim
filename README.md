@@ -16,13 +16,27 @@ that automatic without any special wrapper command or instructions in
 ## How it works
 
 `~/.local/bin/gh` is a symlink to `bin/gh`, placed earlier on `PATH` than the
-real `gh`. On every invocation it branches on the `CLAUDECODE` environment
-variable, which Claude Code sets in its shell but a normal terminal does not:
+real `gh`. On every invocation it branches on an agent-session marker
+environment variable — one that an agent's shell sets but a normal terminal
+does not:
 
-| Caller                         | `CLAUDECODE` | Behavior                                   |
-| ------------------------------ | ------------ | ------------------------------------------ |
-| Claude Code (Bash tool)        | set          | mints a GitHub App installation token, runs the real `gh` as the bot |
-| You, in a normal terminal      | unset        | passes straight through — your own `gh` auth, untouched |
+| Caller                    | Marker                   | Behavior                                   |
+| ------------------------- | ------------------------ | ------------------------------------------ |
+| Claude Code (Bash tool)   | `CLAUDECODE` (built-in)  | mints a GitHub App installation token, runs the real `gh` as the bot |
+| Codex                     | `GH_SHIM_CODEX` (see below) | same — acts as the bot |
+| You, in a normal terminal | neither set              | passes straight through — your own `gh` auth, untouched |
+
+Codex has no built-in "inside a session" variable of its own, so `install.sh`
+adds a `[shell_environment_policy]` block to `~/.codex/config.toml` that injects
+`GH_SHIM_CODEX=1` into every command Codex runs:
+
+```toml
+[shell_environment_policy]
+set = { GH_SHIM_CODEX = "1" }
+```
+
+If a `[shell_environment_policy]` block already exists, the installer leaves it
+alone and prints the one line to add by hand.
 
 The shim mints a short-lived GitHub App installation token from the App's
 private key (a signed RS256 JWT exchanged for an installation token), caches it

@@ -1,3 +1,5 @@
 # Never commit secrets or local config.
 *.pem
 config.env
+
+.idea/

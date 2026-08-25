@@ -4,7 +4,8 @@
 #
 #   1. Requires a real `gh` binary to already be installed (see
 #      https://github.com/cli/cli#installation).
-#   2. Symlinks bin/gh into ~/.local/bin/gh so it shadows the real gh on PATH.
+#   2. Symlinks bin/gh into ~/.local/bin/gh so it shadows the real gh on PATH,
+#      plus gh-claude and gh-claude-reviewer next to it.
 #   3. Seeds ~/.config/gh-app-shim/config.env from config.example.env.
 #
 set -euo pipefail
@@ -43,15 +44,23 @@ else
         If gh lives somewhere off PATH, set REAL_GH in $CONFIG_FILE."
 fi
 
-# --- 2. shim symlink --------------------------------------------------------
+# --- 2. shim symlinks -------------------------------------------------------
+BIN_DIR="$(dirname "$SHIM_DST")"
 chmod +x "$SHIM_SRC"
-mkdir -p "$(dirname "$SHIM_DST")"
+mkdir -p "$BIN_DIR"
 ln -sf "$SHIM_SRC" "$SHIM_DST"
 log "linked shim: $SHIM_DST -> $SHIM_SRC"
 
+# The same script also serves the explicit bot commands — it reads the identity
+# from the name it was invoked as.
+for name in gh-claude gh-claude-reviewer; do
+  ln -sf "$SHIM_SRC" "$BIN_DIR/$name"
+  log "linked shim: $BIN_DIR/$name -> $SHIM_SRC"
+done
+
 case ":$PATH:" in
-  *":$(dirname "$SHIM_DST"):"*) ;;
-  *) warn "$(dirname "$SHIM_DST") is not on your PATH — add it so the shim takes effect" ;;
+  *":$BIN_DIR:"*) ;;
+  *) warn "$BIN_DIR is not on your PATH — add it so the shim takes effect" ;;
 esac
 
 # --- 3. config --------------------------------------------------------------
@@ -106,6 +115,13 @@ Done. Final steps:
   1. Put the GitHub App private key at the KEY_PATH from $CONFIG_FILE
      (default: $CONFIG_DIR/app.pem), then: chmod 600 that file.
   2. Verify the values in $CONFIG_FILE (APP_ID, INSTALLATION_ID).
-  3. Test as the bot:   CLAUDECODE=1 gh api /installation/repositories --jq '.repositories[].full_name'
-     Test as yourself:  gh api user --jq .login                 # -> your login
+  3. For gh-claude-reviewer, uncomment REVIEWER_APP_ID,
+     REVIEWER_INSTALLATION_ID and REVIEWER_KEY_PATH in $CONFIG_FILE, and put
+     that App's key at REVIEWER_KEY_PATH (suggested:
+     $CONFIG_DIR/reviewer.pem), then: chmod 600 that file.
+     Leave them commented out if you do not use the second bot.
+  4. Test as the bot:      CLAUDECODE=1 gh api /installation/repositories --jq '.repositories[].full_name'
+     Test gh-claude:       gh-claude api /installation/repositories --jq '.repositories[].full_name'
+     Test the reviewer:    gh-claude-reviewer api /installation/repositories --jq '.repositories[].full_name'
+     Test as yourself:     gh api user --jq .login              # -> your login
 EOF

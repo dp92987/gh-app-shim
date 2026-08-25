@@ -9,6 +9,14 @@
 #   * When invoked by a human in a normal shell, it passes straight through
 #     to the real `gh` and uses whatever auth the human already has.
 #
+# The same script also serves two explicit commands, installed as symlinks to
+# it, that always act as a bot whoever the caller is:
+#
+#   * gh-claude          — the primary App, the one plain `gh` uses in a
+#                          Claude Code session.
+#   * gh-claude-reviewer — a second App with its own key, so a review posted
+#                          by it is clearly a different bot from the author.
+#
 # Configuration lives outside this repo (no secrets in git):
 #   ~/.config/gh-app-shim/config.env   (override with GH_APP_SHIM_CONFIG)
 #
@@ -42,12 +50,26 @@ real_gh=$(resolve_real_gh) || {
   exit 127
 }
 
+# --- identity: chosen by the name we were invoked as ------------------------
+# gh                 — the original behavior: the bot inside an agent session,
+#                      your own auth in a human shell or a passthrough repo.
+# gh-claude          — always the primary App bot (APP_ID / INSTALLATION_ID).
+# gh-claude-reviewer — always the second App bot (REVIEWER_* in the config).
+# An explicit command name is an explicit choice of identity, so the session
+# marker and the passthrough lists below are checked for `gh` only — otherwise
+# `gh-claude-reviewer` would silently act as someone else.
+case "$(basename -- "$0")" in
+  gh-claude-reviewer) profile=reviewer ;;
+  gh-claude)          profile=claude ;;
+  *)                  profile=default ;;
+esac
+
 # --- human shell → transparent pass-through ---------------------------------
 # CLAUDECODE is set by Claude Code; GH_SHIM_CODEX is injected into Codex
 # sessions via ~/.codex/config.toml's shell_environment_policy (Codex has no
 # built-in marker of its own — install.sh wires this up). With neither set we
 # are in a plain human shell, so pass straight through to the real gh.
-if [[ -z "${CLAUDECODE:-}" && -z "${GH_SHIM_CODEX:-}" ]]; then
+if [[ "$profile" == default && -z "${CLAUDECODE:-}" && -z "${GH_SHIM_CODEX:-}" ]]; then
   exec "$real_gh" "$@"
 fi
 
@@ -132,16 +154,30 @@ wants_passthrough() {
 }
 
 # Configured passthrough repo → behave like a normal terminal (your own auth).
-if wants_passthrough "$@"; then
+if [[ "$profile" == default ]] && wants_passthrough "$@"; then
   exec "$real_gh" "$@"
 fi
 
-# --- Claude Code session → authenticate as the GitHub App bot ---------------
-: "${APP_ID:?gh-app-shim: APP_ID not set in $CONFIG_FILE}"
-: "${INSTALLATION_ID:?gh-app-shim: INSTALLATION_ID not set in $CONFIG_FILE}"
-: "${KEY_PATH:?gh-app-shim: KEY_PATH not set in $CONFIG_FILE}"
+# --- authenticate as the GitHub App bot ------------------------------------
+# The reviewer is a different App, so it needs its own id, installation and
+# key. Its token is cached separately — one cache file per App, or the two
+# would overwrite each other's token.
+token_suffix=""
+if [[ "$profile" == reviewer ]]; then
+  : "${REVIEWER_APP_ID:?gh-app-shim: REVIEWER_APP_ID not set in $CONFIG_FILE}"
+  : "${REVIEWER_INSTALLATION_ID:?gh-app-shim: REVIEWER_INSTALLATION_ID not set in $CONFIG_FILE}"
+  : "${REVIEWER_KEY_PATH:?gh-app-shim: REVIEWER_KEY_PATH not set in $CONFIG_FILE}"
+  APP_ID="$REVIEWER_APP_ID"
+  INSTALLATION_ID="$REVIEWER_INSTALLATION_ID"
+  KEY_PATH="$REVIEWER_KEY_PATH"
+  token_suffix="-reviewer"
+else
+  : "${APP_ID:?gh-app-shim: APP_ID not set in $CONFIG_FILE}"
+  : "${INSTALLATION_ID:?gh-app-shim: INSTALLATION_ID not set in $CONFIG_FILE}"
+  : "${KEY_PATH:?gh-app-shim: KEY_PATH not set in $CONFIG_FILE}"
+fi
 
-TOKEN_FILE="${TOKEN_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/gh-app-shim-token}"
+TOKEN_FILE="${TOKEN_CACHE:-${XDG_RUNTIME_DIR:-/tmp}/gh-app-shim-token}${token_suffix}"
 EXPIRES_FILE="${TOKEN_FILE}.expires"
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }

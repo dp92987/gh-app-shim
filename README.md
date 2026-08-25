@@ -6,6 +6,10 @@ A transparent drop-in replacement for the [`gh`](https://cli.github.com/) CLI
 that authenticates as a **GitHub App** when (and only when) it runs inside a
 Claude Code session.
 
+It also installs two explicit commands — `gh-claude` and `gh-claude-reviewer` —
+that always act as a bot, each as its own GitHub App. See
+[Explicit bot commands](#explicit-bot-commands).
+
 ## Why
 
 When Claude Code creates pull requests, posts comments, or runs reviews, those
@@ -64,7 +68,8 @@ cd gh-app-shim
 
 1. Finds a real `gh` on `PATH` (fails with install instructions if none — the
    GitHub CLI is a prerequisite, not something the shim installs).
-2. Symlinks `bin/gh` → `~/.local/bin/gh`.
+2. Symlinks `bin/gh` → `~/.local/bin/gh`, plus `gh-claude` and
+   `gh-claude-reviewer` next to it.
 3. Seeds `~/.config/gh-app-shim/config.env` from `config.example.env` and pins
    `REAL_GH`.
 
@@ -73,6 +78,8 @@ Then finish setup:
 1. Place the App private key at `KEY_PATH` (default
    `~/.config/gh-app-shim/app.pem`) and `chmod 600` it.
 2. Check `APP_ID` / `INSTALLATION_ID` in `~/.config/gh-app-shim/config.env`.
+3. Optionally set the `REVIEWER_*` values for `gh-claude-reviewer` — see
+   [Explicit bot commands](#explicit-bot-commands).
 
 ## Verify
 
@@ -87,10 +94,47 @@ CLAUDECODE=1 gh api /installation/repositories --jq '.repositories[].full_name'
 
 # as yourself — your own auth, untouched:
 gh api user --jq .login                # -> your personal login
+
+# the explicit commands — no marker needed, each lists its own App's repos:
+gh-claude api /installation/repositories --jq '.repositories[].full_name'
+gh-claude-reviewer api /installation/repositories --jq '.repositories[].full_name'
 ```
 
 The bot can only act on repositories the GitHub App is installed on. Add or
 remove repos from the App's installation in its GitHub settings.
+
+## Explicit bot commands
+
+`gh` picks its identity from the environment. The two commands below pick it
+from their own name, so the identity is never a guess:
+
+| Command              | Acts as                               | Session marker / passthrough |
+| -------------------- | ------------------------------------- | ---------------------------- |
+| `gh`                 | the bot in an agent session, you in a normal terminal | respected |
+| `gh-claude`          | the primary App — the same bot `gh` uses in a session | ignored |
+| `gh-claude-reviewer` | a second App with its own key         | ignored |
+
+`gh-claude` and `gh-claude-reviewer` are symlinks to the same `bin/gh`,
+created by `install.sh`. Both mint an installation token and refuse to run
+without one, exactly like `gh` in a session. Because they ignore the session
+marker, they act as the bot in a normal terminal too.
+
+Use `gh-claude-reviewer` when a review must come from a different account than
+the pull request author. GitHub does not let an App approve its own pull
+request, so a second App solves that.
+
+Give the second App its own credentials in `config.env`:
+
+```sh
+REVIEWER_APP_ID=234567
+REVIEWER_INSTALLATION_ID=23456789
+REVIEWER_KEY_PATH=$HOME/.config/gh-app-shim/reviewer.pem
+```
+
+Leave them unset if you do not use the second bot: `gh` and `gh-claude` keep
+working, and `gh-claude-reviewer` stops with a message that names the missing
+variable. Each App caches its token in a separate file, so the two never
+overwrite each other.
 
 ## Acting as yourself in specific orgs/repos (passthrough)
 
@@ -136,7 +180,8 @@ git clone <this-repo> && cd gh-app-shim && ./install.sh
 ```
 
 That's it — the shim, installer, and config template live in git; only the
-`.pem` key and the filled-in `config.env` stay local (and are `.gitignore`d).
+`.pem` keys (the App's, and the reviewer App's if you use one) and the
+filled-in `config.env` stay local (and are `.gitignore`d).
 
 ## Configuration
 
